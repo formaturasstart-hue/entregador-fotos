@@ -1,0 +1,27 @@
+# Caddy: recebe em https://fotos.startfotos.com.br, cuida do certificado sozinho
+# e repassa para o entregador. {$DOMINIO} vem do .env.
+{$DOMINIO} {
+	encode zstd gzip
+	request_body {
+		max_size 1MB
+	}
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		Referrer-Policy "no-referrer"
+	}
+	reverse_proxy entregador:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+	log {
+		output file /data/acesso.log {
+			roll_size 20MiB
+			roll_keep 3
+		}
+		format json
+	}
+}

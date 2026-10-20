@@ -1,0 +1,41 @@
+# Dois contêineres: o entregador (Node) e o Caddy (HTTPS automático com Let's Encrypt).
+# Sobe com: docker compose up -d --build
+services:
+  entregador:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORTA: "8080"
+      CACHE_DIR: /cache
+    user: "1000:1000"
+    volumes:
+      - ./cache:/cache
+    expose:
+      - "8080"
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [entregador]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMINIO: ${DOMINIO:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_dados:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  caddy_dados:
+  caddy_config:
