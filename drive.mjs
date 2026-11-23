@@ -2,6 +2,7 @@
 // Gera o token OAuth na mão (JWT assinado com a chave privada da conta de serviço) e
 // chama a API REST do Drive v3 com fetch. Nunca apaga, nunca move: só lê.
 import { createSign } from "node:crypto";
+import { medidasReais, orientacaoConfere } from "./orientacao.mjs";
 
 const ESCOPO_LEITURA = "https://www.googleapis.com/auth/drive.readonly";
 const API = (process.env.DRIVE_API_BASE || "https://www.googleapis.com/drive/v3").replace(/\/$/, "");
@@ -76,24 +77,52 @@ async function driveGet(caminho, params = {}, timeoutMs = 30_000) {
   return r;
 }
 
-/** Metadados básicos (nome, tipo, link de miniatura). */
+/** Metadados básicos (nome, tipo, link de miniatura e medidas reais com o giro EXIF). */
 export async function metadados(fileId) {
-  const r = await driveGet(`files/${encodeURIComponent(fileId)}`, { fields: "name,mimeType,size,thumbnailLink" });
+  const r = await driveGet(`files/${encodeURIComponent(fileId)}`, { fields: "name,mimeType,size,thumbnailLink,imageMediaMetadata(width,height,rotation)" });
   return r.json();
 }
 
+async function buscarMiniatura(link, tamanho) {
+  const url = link.replace(/=s\d+(-[a-z]+)*$/i, `=s${tamanho}`);
+  const token = await obterTokenDrive();
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60_000) });
+  if (!r.ok) throw Object.assign(new Error(`Miniatura indisponível (${r.status}).`), { status: 502 });
+  return { tipo: r.headers.get("content-type") || "image/jpeg", buf: Buffer.from(await r.arrayBuffer()) };
+}
+
 /**
- * Miniatura gerada pelo Google (pixels no lado maior). Devolve a Response para streaming.
+ * Miniatura gerada pelo Google (pixels no lado maior). Devolve uma Response.
  * Se o arquivo não tiver miniatura (raro: HEIC/TIFF grandes), devolve null.
+ * Giro (23/11/2026): se a miniatura pequena vier deitada e a foto for em pé (ou o contrário),
+ * usa a de 1600, que o Google gera já girada (ver orientacao.mjs). Header X-Giro conta o que houve.
  */
 export async function baixarMiniatura(fileId, tamanho) {
   const meta = await metadados(fileId);
   if (!meta.thumbnailLink) return null;
-  const url = meta.thumbnailLink.replace(/=s\d+(-[a-z]+)*$/i, `=s${tamanho}`);
-  const token = await obterTokenDrive();
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60_000) });
-  if (!r.ok) throw Object.assign(new Error(`Miniatura indisponível (${r.status}).`), { status: 502 });
-  return r;
+  const real = medidasReais(meta.imageMediaMetadata);
+  let m = await buscarMiniatura(meta.thumbnailLink, tamanho);
+  let giro = null;
+  if (!orientacaoConfere(m.buf, real)) {
+    giro = "errada";
+    if (tamanho < 1600) {
+      const maior = await buscarMiniatura(meta.thumbnailLink, 1600);
+      if (orientacaoConfere(maior.buf, real)) {
+        m = maior;
+        giro = "corrigida-1600";
+      }
+    }
+    console.log(`[entregador] giro ${giro} ${tamanho} ${fileId}`);
+  }
+  const headers = { "content-type": m.tipo };
+  if (giro) headers["x-giro"] = giro;
+  return new Response(m.buf, { headers });
+}
+
+/** A miniatura guardada no disco está com o giro certo? (null = não deu para saber). Usa 1 consulta ao Drive. */
+export async function giroConfere(fileId, buf) {
+  const meta = await metadados(fileId);
+  return orientacaoConfere(buf, medidasReais(meta.imageMediaMetadata));
 }
 
 /** Arquivo original, em streaming. */

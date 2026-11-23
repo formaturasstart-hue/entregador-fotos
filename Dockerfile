@@ -1,7 +1,7 @@
 # Entregador de fotos da Start — imagem pequena, sem npm install (não tem dependências)
 FROM node:22-alpine
 WORKDIR /app
-COPY servidor.mjs drive.mjs zip.mjs ./
+COPY servidor.mjs drive.mjs zip.mjs orientacao.mjs ./
 ENV NODE_ENV=production PORTA=8080 CACHE_DIR=/cache
 EXPOSE 8080
 USER node

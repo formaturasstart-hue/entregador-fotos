@@ -15,6 +15,36 @@ const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(
 const ORIG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1]), Buffer.alloc(300_000, 9), Buffer.from([0xff, 0xd9])]);
 const chamadas = { meta: 0, thumb: 0, orig: 0 };
 
+// JPEG mínimo com o tamanho no SOF (e a orientação EXIF opcional), para o teste do giro
+function jpegDe(largura, altura, orientacao = 0) {
+  const partes = [Buffer.from([0xff, 0xd8])];
+  if (orientacao) {
+    const tiff = Buffer.alloc(26);
+    tiff.write("MM", 0, "latin1");
+    tiff.writeUInt16BE(42, 2);
+    tiff.writeUInt32BE(8, 4);
+    tiff.writeUInt16BE(1, 8);
+    tiff.writeUInt16BE(0x0112, 10);
+    tiff.writeUInt16BE(3, 12);
+    tiff.writeUInt32BE(1, 14);
+    tiff.writeUInt16BE(orientacao, 18);
+    const corpo = Buffer.concat([Buffer.from("Exif\0\0", "latin1"), tiff]);
+    const cab = Buffer.from([0xff, 0xe1, 0, 0]);
+    cab.writeUInt16BE(corpo.length + 2, 2);
+    partes.push(cab, corpo);
+  }
+  const sof = Buffer.from([0xff, 0xc0, 0, 17, 8, 0, 0, 0, 0, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+  sof.writeUInt16BE(altura, 5);
+  sof.writeUInt16BE(largura, 7);
+  partes.push(sof, Buffer.from([0xff, 0xda, 0, 2]), Buffer.alloc(800, 5), Buffer.from([0xff, 0xd9]));
+  return Buffer.concat(partes);
+}
+// "giro…"/"velha…": foto em pé (6000×4000 com giro de 90°) cujas miniaturas 320/640 vêm DEITADAS
+// e a de 1600 em pé — como a IMG_1871.JPG de 23/11/2026. "exifok…": miniatura deitada nos pixels
+// mas com orientação EXIF 6 (o navegador mostra em pé) → não mexe.
+const ehGiro = (id) => /^(giro|velha|exifok)/.test(id);
+const miniaturaGiro = (id, s) => (id.startsWith("exifok") ? jpegDe(s, Math.round(s / 1.5), 6) : s >= 1600 ? jpegDe(1067, 1600) : jpegDe(s, Math.round(s / 1.5)));
+
 // ---- Drive falso ----
 const drive = http.createServer((req, res) => {
   const u = new URL(req.url, "http://x");
@@ -30,10 +60,12 @@ const drive = http.createServer((req, res) => {
     chamadas.meta++;
     if (m[1] === "sumiu12345") return res.writeHead(404).end();
     const semThumb = m[1] === "semthumb123";
-    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ name: `Foto ${m[1]}.jpg`, mimeType: "image/jpeg", thumbnailLink: semThumb ? undefined : `http://127.0.0.1:${portaDrive}/thumb/${m[1]}=s220` }));
+    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ name: `Foto ${m[1]}.jpg`, mimeType: "image/jpeg", ...(ehGiro(m[1]) ? { imageMediaMetadata: { width: 6000, height: 4000, rotation: 1 } } : {}), thumbnailLink: semThumb ? undefined : `http://127.0.0.1:${portaDrive}/thumb/${m[1]}=s220` }));
   }
   if (u.pathname.startsWith("/thumb/")) {
     chamadas.thumb++;
+    const [idT, sT] = u.pathname.slice(7).split("=s");
+    if (ehGiro(idT)) return res.writeHead(200, { "content-type": "image/jpeg" }).end(miniaturaGiro(idT, Number(sT)));
     return res.writeHead(200, { "content-type": "image/jpeg", "x-tamanho": u.pathname.split("=s")[1] }).end(JPEG);
   }
   res.writeHead(404).end();
@@ -127,6 +159,37 @@ try {
   confere("/saude ok, com disco e contadores", r.status === 200 && saude.ok === true && saude.drive.ok && saude.disco.livre_gb > 0 && saude.contadores.hits >= 3 && saude.contadores.misses >= 3, `hits=${saude.contadores.hits} misses=${saude.contadores.misses}`);
   confere("raiz responde texto", (await (await fetch(base)).text()).includes("ativo"));
   confere("rota desconhecida → 404", (await fetch(`${base}/qualquer`)).status === 404);
+
+  // giro (23/11/2026)
+  const { medidasJpeg } = await import("./orientacao.mjs");
+  const medidas = async (resp) => medidasJpeg(Buffer.from(await resp.arrayBuffer()));
+  let d = await medidas(await foto("giro123456", 640));
+  confere("miniatura 640 deitada de foto em pé → entrega a de 1600, em pé", d && d.altura > d.largura, JSON.stringify(d));
+  d = await medidas(await foto("giro123456", 640));
+  confere("…e a 2ª vez sai do cache já em pé", d && d.altura > d.largura);
+  d = await medidas(await foto("exifok12345", 320));
+  confere("miniatura com orientação EXIF certa → não troca", d && d.altura > d.largura && d.largura === 213, JSON.stringify(d));
+  r = await foto("abcdefghij2", 320);
+  confere("foto sem medidas no Drive → entrega como veio", r.status === 200 && Buffer.from(await r.arrayBuffer()).equals(JPEG));
+
+  // cache antigo (antes do giro): a deitada errada é apagada depois de entregue; a em pé só é marcada
+  await fsp.mkdir(path.join(cacheDir, "ve"), { recursive: true });
+  await fsp.writeFile(path.join(cacheDir, "ve", "velha12345.640"), jpegDe(640, 427));
+  await fsp.writeFile(path.join(cacheDir, "ve", "velha12345.640.meta"), JSON.stringify({ tipo: "image/jpeg" }));
+  await fsp.writeFile(path.join(cacheDir, "ve", "velha99999.640"), jpegDe(427, 640));
+  await fsp.writeFile(path.join(cacheDir, "ve", "velha99999.640.meta"), JSON.stringify({ tipo: "image/jpeg" }));
+  const metaAntes = chamadas.meta;
+  r = await foto("velha12345", 640);
+  d = await medidas(r);
+  confere("cache antigo deitado: 1º pedido ainda sai do disco (HIT)", r.headers.get("x-cache") === "HIT" && d.largura > d.altura);
+  await foto("velha99999", 640);
+  await new Promise((res) => setTimeout(res, 400));
+  const sobrou = await fsp.readdir(path.join(cacheDir, "ve"));
+  confere("…conferida em segundo plano e apagada do cache", !sobrou.includes("velha12345.640"), sobrou.join(","));
+  confere("cache antigo em pé: marcado sem consultar o Drive", JSON.parse(await fsp.readFile(path.join(cacheDir, "ve", "velha99999.640.meta"), "utf8")).giro === 2 && chamadas.meta === metaAntes + 1, `consultas=${chamadas.meta - metaAntes}`);
+  r = await foto("velha12345", 640);
+  d = await medidas(r);
+  confere("…e o próximo pedido baixa de novo, já em pé", r.headers.get("x-cache") === "MISS" && d.altura > d.largura);
 
   // arquivos no disco
   const arquivos = await fsp.readdir(path.join(cacheDir, "ab"));

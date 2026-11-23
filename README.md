@@ -26,6 +26,7 @@ no projeto principal.
 | Arquivo | Para quê |
 |---|---|
 | `servidor.mjs` | o servidor (rotas, cache, limites, saúde) |
+| `orientacao.mjs` | lê o tamanho e o giro (EXIF) no cabeçalho do JPEG, para conferir se a miniatura veio deitada (23/11/2026) |
 | `drive.mjs` | token OAuth da conta de serviço (JWT assinado na mão) e chamadas ao Drive v3 |
 | `zip.mjs` | ZIP em streaming (mesmo formato do `src/lib/zip-stream.ts` do sistema) |
 | `Dockerfile`, `compose.yml`, `Caddyfile` | contêineres: entregador + Caddy (HTTPS automático) |
@@ -61,3 +62,17 @@ du -sh cache                          # quanto o cache ocupa
 Desligar o entregador sem derrubar nada: apague `NEXT_PUBLIC_FOTOS_BASE` na Vercel e faça um redeploy —
 as fotos voltam a sair da Vercel na hora. O cache pode ser apagado a qualquer momento (`rm -rf cache/*`);
 ele se refaz sozinho.
+
+## Fotos deitadas (23/11/2026, v1.1.0)
+
+Em fotos de câmera (ex.: IMG_1871.JPG de um formando), o Google às vezes gera as miniaturas 320 e 640
+**deitadas** (sem o giro EXIF) e a de 1600 em pé. O entregador agora compara a miniatura com as medidas
+reais que o Drive informa (`imageMediaMetadata`: largura, altura e giro) e, se não bater, entrega a de 1600
+no lugar (só nessas fotos, que são raras). A resposta da 1ª vez traz o cabeçalho `X-Giro`; o log mostra
+`giro corrigida-1600`.
+
+Miniaturas guardadas antes disso: quando alguém pede uma delas, o entregador confere **depois** de
+entregar (sem atrasar). Em pé ou quadrada: só marca como conferida, sem consultar o Drive. Deitada:
+1 consulta ao Drive; se estava errada, apaga do disco e o próximo pedido baixa certa. Os navegadores
+guardam a foto por 7 dias: quem já viu a deitada aperta **Ctrl+F5** na página para buscar de novo.
+

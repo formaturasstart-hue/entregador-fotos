@@ -15,10 +15,11 @@ import path from "node:path";
 import { createHmac, timingSafeEqual, randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { baixarMiniatura, baixarOriginal, metadados, testarDrive, emailContaServico } from "./drive.mjs";
+import { baixarMiniatura, baixarOriginal, metadados, testarDrive, emailContaServico, giroConfere } from "./drive.mjs";
+import { medidasJpeg } from "./orientacao.mjs";
 import { montarZip } from "./zip.mjs";
 
-const VERSAO = "1.0.0";
+const VERSAO = "1.1.0"; // 1.1.0 (23/11/2026): confere o giro das miniaturas
 const PORTA = Number(process.env.PORTA || 8080);
 const CACHE_DIR = path.resolve(process.env.CACHE_DIR || "./cache");
 const CACHE_MAX = (Number(process.env.CACHE_MAX_GB) || 60) * 1e9; // apaga os mais antigos acima disso
@@ -117,7 +118,9 @@ function obterDoCache(chave, abrir) {
       const [st, meta] = await Promise.all([fsp.stat(arq), fsp.readFile(`${arq}.meta`, "utf8")]);
       fsp.utimes(arq, new Date(), new Date()).catch(() => {}); // marca como usado (o faxineiro apaga os mais antigos)
       contadores.hits++;
-      return { arq, tipo: JSON.parse(meta).tipo, tamanho: st.size, hit: true };
+      const m = JSON.parse(meta);
+      if (m.giro !== GIRO_VERSAO && !chave.endsWith(".orig")) conferirGiroDepois(chave, arq);
+      return { arq, tipo: m.tipo, tamanho: st.size, hit: true };
     } catch {
       /* não está no cache */
     }
@@ -132,7 +135,8 @@ function obterDoCache(chave, abrir) {
       try {
         await pipeline(Readable.fromWeb(r.body), fs.createWriteStream(tmp));
         const st = await fsp.stat(tmp);
-        await fsp.writeFile(`${arq}.meta`, JSON.stringify({ tipo }));
+        // miniatura nova já passou pela conferência do giro (drive.mjs); o original não precisa
+        await fsp.writeFile(`${arq}.meta`, JSON.stringify({ tipo, giro: GIRO_VERSAO }));
         await fsp.rename(tmp, arq);
         contadores.bytes_drive += st.size;
         disco.livre -= st.size;
@@ -145,6 +149,60 @@ function obterDoCache(chave, abrir) {
   })().finally(() => emAndamento.delete(chave));
   emAndamento.set(chave, p);
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// Giro das miniaturas guardadas ANTES de 23/11/2026 (ver orientacao.mjs): quando uma delas é
+// pedida, confere depois de entregar, sem atrasar ninguém. Em pé ou quadrada: só marca como
+// conferida (o erro é sempre a miniatura DEITADA de uma foto em pé). Deitada: pergunta ao Drive
+// as medidas reais (1 consulta, uma vez por arquivo); se estava errada, apaga do disco e o
+// próximo pedido baixa de novo, já certo. No máximo 2 conferências ao mesmo tempo.
+// ---------------------------------------------------------------------------
+const GIRO_VERSAO = 2;
+const giroFila = [];
+const giroVistos = new Set();
+let giroAtivos = 0;
+function conferirGiroDepois(chave, arq) {
+  if (giroVistos.has(chave) || giroFila.length > 5000) return;
+  giroVistos.add(chave);
+  giroFila.push({ chave, arq });
+  proximoGiro();
+}
+function proximoGiro() {
+  while (giroAtivos < 2 && giroFila.length) {
+    const { chave, arq } = giroFila.shift();
+    giroAtivos++;
+    conferirGiro(chave, arq)
+      .catch((e) => console.log(`[entregador] giro: não conferi ${chave}: ${e.message}`))
+      .finally(() => {
+        giroAtivos--;
+        proximoGiro();
+      });
+  }
+}
+async function conferirGiro(chave, arq) {
+  const fd = await fsp.open(arq, "r");
+  let cabeca;
+  try {
+    const b = Buffer.alloc(256 * 1024);
+    const { bytesRead } = await fd.read(b, 0, b.length, 0);
+    cabeca = b.subarray(0, bytesRead);
+  } finally {
+    await fd.close();
+  }
+  const m = medidasJpeg(cabeca);
+  const metaArq = `${arq}.meta`;
+  const marcar = async () => {
+    const atual = JSON.parse(await fsp.readFile(metaArq, "utf8"));
+    await fsp.writeFile(metaArq, JSON.stringify({ ...atual, giro: GIRO_VERSAO }));
+  };
+  if (!m || m.largura <= m.altura * 1.05) return marcar();
+  const id = chave.slice(0, chave.lastIndexOf("."));
+  if (await giroConfere(id, cabeca)) return marcar();
+  await Promise.all([fsp.unlink(arq), fsp.unlink(metaArq)]).catch(() => {});
+  giroVistos.delete(chave);
+  contadores.giros_corrigidos = (contadores.giros_corrigidos || 0) + 1;
+  console.log(`[entregador] giro: ${chave} estava deitada; apagada do cache (o próximo pedido baixa certa)`);
 }
 
 // Faxineiro: a cada 15 min mede o cache e apaga os menos usados quando passa do limite
