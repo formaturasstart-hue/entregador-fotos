@@ -76,3 +76,12 @@ entregar (sem atrasar). Em pé ou quadrada: só marca como conferida, sem consul
 1 consulta ao Drive; se estava errada, apaga do disco e o próximo pedido baixa certa. Os navegadores
 guardam a foto por 7 dias: quem já viu a deitada aperta **Ctrl+F5** na página para buscar de novo.
 
+
+## Espaço das fotos na página de status (23/11/2026, v1.2.0)
+
+O `/saude` agora informa também o tamanho total do disco (`total_gb`) e a **vitrine das entregas**
+(`vitrine_gb`, `vitrine_arquivos`): as miniaturas com logo que o separador grava em
+`/opt/separador/dados/vitrine`. O entregador só **mede** essa pasta, montada **só leitura** no `compose.yml`
+(`VITRINE_HOST` no `.env` troca o caminho, se o separador estiver em outro lugar). Mede de hora em hora.
+O vigia da página de status (`status-start`, `scripts/disco.mjs`) lê esses números a cada 5 minutos,
+guarda um ponto por dia e manda e-mail quando o disco fica com menos de 10 GB livres.

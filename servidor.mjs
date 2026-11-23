@@ -19,10 +19,13 @@ import { baixarMiniatura, baixarOriginal, metadados, testarDrive, emailContaServ
 import { medidasJpeg } from "./orientacao.mjs";
 import { montarZip } from "./zip.mjs";
 
-const VERSAO = "1.1.0"; // 1.1.0 (23/11/2026): confere o giro das miniaturas
+const VERSAO = "1.2.0"; // 1.1.0 (23/11/2026): confere o giro das miniaturas · 1.2.0: mede a vitrine e o disco para o status
 const PORTA = Number(process.env.PORTA || 8080);
 const CACHE_DIR = path.resolve(process.env.CACHE_DIR || "./cache");
 const CACHE_MAX = (Number(process.env.CACHE_MAX_GB) || 60) * 1e9; // apaga os mais antigos acima disso
+// Vitrine das entregas (miniaturas com logo que o separador grava em /opt/separador/dados/vitrine): o entregador
+// só MEDE o tamanho, para a página de status mostrar o espaço das fotos (23/11/2026). Montada só leitura no compose.
+const VITRINE_DIR = process.env.VITRINE_DIR ? path.resolve(process.env.VITRINE_DIR) : "";
 const RESERVA_DISCO = (Number(process.env.RESERVA_DISCO_GB) || 3) * 1e9; // abaixo disso, não guarda mais nada
 const MAX_ZIP = Number(process.env.MAX_ZIP || 200);
 const DRIVE_SIMULTANEOS = Number(process.env.DRIVE_SIMULTANEOS || 12);
@@ -50,7 +53,7 @@ const ID_OK = /^[\w-]{10,}$/;
 // Contadores (aparecem em /saude)
 // ---------------------------------------------------------------------------
 const contadores = { inicio: new Date().toISOString(), hits: 0, misses: 0, erros: 0, zips: 0, bytes_servidos: 0, bytes_drive: 0, recusados: 0 };
-let disco = { livre: null, cache_bytes: 0, cache_arquivos: 0, varrido_em: null };
+let disco = { livre: null, total: null, cache_bytes: 0, cache_arquivos: 0, varrido_em: null, vitrine_bytes: null, vitrine_arquivos: null, vitrine_em: null };
 
 // ---------------------------------------------------------------------------
 // Limite de pedidos por IP (protege a cota do Drive se alguém sair baixando tudo)
@@ -103,6 +106,7 @@ async function medirDisco() {
   try {
     const s = await fsp.statfs(CACHE_DIR);
     disco.livre = Number(s.bavail) * Number(s.bsize);
+    disco.total = Number(s.blocks) * Number(s.bsize);
   } catch {
     disco.livre = 0;
   }
@@ -247,7 +251,37 @@ async function faxina() {
   }
   await medirDisco();
   disco = { ...disco, cache_bytes: total, cache_arquivos: arquivos.length - apagados, varrido_em: new Date().toISOString() };
+  await medirVitrine();
   console.log(`[entregador] faxina: ${arquivos.length - apagados} arquivos, ${(total / 1e9).toFixed(2)} GB em cache, ${apagados} apagados, livre ${(disco.livre / 1e9).toFixed(1)} GB (${Date.now() - t0} ms)`);
+}
+// Tamanho da vitrine (só leitura; nunca apaga nada lá). Uma vez por hora basta: ela só cresce quando uma entrega é lida.
+async function medirVitrine() {
+  if (!VITRINE_DIR || (disco.vitrine_em && Date.now() - Date.parse(disco.vitrine_em) < 55 * 60_000)) return;
+  let bytes = 0;
+  let arquivos = 0;
+  async function andar(dir) {
+    let itens;
+    try {
+      itens = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const it of itens) {
+      const p = path.join(dir, it.name);
+      if (it.isDirectory()) await andar(p);
+      else if (it.isFile()) {
+        const st = await fsp.stat(p).catch(() => null);
+        if (st) {
+          bytes += st.size;
+          arquivos++;
+        }
+      }
+    }
+  }
+  const t0 = Date.now();
+  await andar(VITRINE_DIR);
+  disco = { ...disco, vitrine_bytes: bytes, vitrine_arquivos: arquivos, vitrine_em: new Date().toISOString() };
+  console.log(`[entregador] vitrine: ${arquivos} arquivos, ${(bytes / 1e9).toFixed(2)} GB (${Date.now() - t0} ms)`);
 }
 setTimeout(() => faxina().catch((e) => console.error("[entregador] faxina falhou:", e.message)), 10_000).unref();
 setInterval(() => faxina().catch((e) => console.error("[entregador] faxina falhou:", e.message)), 15 * 60_000).unref();
@@ -407,6 +441,7 @@ async function rotaSaude(res) {
     }
   }
   await medirDisco();
+  if (VITRINE_DIR && !disco.vitrine_em) await medirVitrine(); // 1ª vez logo ao ligar; depois, de hora em hora pela faxina
   const discoOk = disco.livre > 1e9;
   const ok = saudeDrive.ok && discoOk;
   res.writeHead(ok ? 200 : 503, { ...CABECALHOS_COMUNS, "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -418,7 +453,19 @@ async function rotaSaude(res) {
         versao: VERSAO,
         verificado_em: new Date().toISOString(),
         drive: { ok: saudeDrive.ok, ms: saudeDrive.ms, detalhe: saudeDrive.detalhe, conta: emailContaServico() },
-        disco: { ok: discoOk, livre_gb: +(disco.livre / 1e9).toFixed(2), cache_gb: +(disco.cache_bytes / 1e9).toFixed(2), cache_arquivos: disco.cache_arquivos, limite_gb: CACHE_MAX / 1e9, medido_em: disco.varrido_em },
+        disco: {
+          ok: discoOk,
+          livre_gb: +(disco.livre / 1e9).toFixed(2),
+          total_gb: disco.total ? +(disco.total / 1e9).toFixed(2) : null,
+          cache_gb: +(disco.cache_bytes / 1e9).toFixed(2),
+          cache_arquivos: disco.cache_arquivos,
+          limite_gb: CACHE_MAX / 1e9,
+          medido_em: disco.varrido_em,
+          // vitrine das entregas (null = pasta não montada neste servidor)
+          vitrine_gb: disco.vitrine_bytes === null ? null : +(disco.vitrine_bytes / 1e9).toFixed(2),
+          vitrine_arquivos: disco.vitrine_arquivos,
+          vitrine_medida_em: disco.vitrine_em,
+        },
         contadores,
       },
       null,

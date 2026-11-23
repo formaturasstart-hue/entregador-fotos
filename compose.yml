@@ -8,9 +8,12 @@ services:
     environment:
       PORTA: "8080"
       CACHE_DIR: /cache
+      VITRINE_DIR: /vitrine
     user: "1000:1000"
     volumes:
       - ./cache:/cache
+      # vitrine do separador, SÓ LEITURA: o entregador só mede o tamanho (página de status, 23/11/2026)
+      - ${VITRINE_HOST:-/opt/separador/dados/vitrine}:/vitrine:ro
     expose:
       - "8080"
     mem_limit: 1536m

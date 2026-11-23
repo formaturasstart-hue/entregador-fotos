@@ -76,9 +76,13 @@ const portaDrive = drive.address().port;
 // ---- Entregador ----
 const cacheDir = await fsp.mkdtemp(path.join(os.tmpdir(), "entregador-teste-"));
 const porta = 18080 + Math.floor(Math.random() * 1000);
+// vitrine de mentira (o separador grava v/<código>/<id>.640.jpg e .320.jpg): 3 arquivos, 6.000 bytes
+const vitrineDir = path.join(cacheDir, "..", `vitrine-teste-${process.pid}`);
+await fsp.mkdir(path.join(vitrineDir, "v", "abc"), { recursive: true });
+for (const n of ["a.640.jpg", "a.320.jpg", "b.640.jpg"]) await fsp.writeFile(path.join(vitrineDir, "v", "abc", n), Buffer.alloc(2000, 1));
 const proc = spawn(process.execPath, ["servidor.mjs"], {
   cwd: import.meta.dirname,
-  env: { ...process.env, PORTA: String(porta), CACHE_DIR: cacheDir, FOTO_SECRET: SEGREDO, DRIVE_TOKEN_TESTE: "token-teste", DRIVE_API_BASE: `http://127.0.0.1:${portaDrive}/drive/v3`, GOOGLE_SERVICE_ACCOUNT_JSON: '{"client_email":"teste@x","private_key":"x"}' },
+  env: { ...process.env, PORTA: String(porta), CACHE_DIR: cacheDir, VITRINE_DIR: vitrineDir, FOTO_SECRET: SEGREDO, DRIVE_TOKEN_TESTE: "token-teste", DRIVE_API_BASE: `http://127.0.0.1:${portaDrive}/drive/v3`, GOOGLE_SERVICE_ACCOUNT_JSON: '{"client_email":"teste@x","private_key":"x"}' },
   stdio: ["ignore", "pipe", "pipe"],
 });
 let log = "";
@@ -156,6 +160,7 @@ try {
   // saúde
   r = await fetch(`${base}/saude`);
   const saude = await r.json();
+  confere("/saude mede a vitrine (só leitura) e o tamanho do disco", saude.disco.vitrine_arquivos === 3 && saude.disco.vitrine_gb === 0 && saude.disco.total_gb > saude.disco.livre_gb, JSON.stringify(saude.disco));
   confere("/saude ok, com disco e contadores", r.status === 200 && saude.ok === true && saude.drive.ok && saude.disco.livre_gb > 0 && saude.contadores.hits >= 3 && saude.contadores.misses >= 3, `hits=${saude.contadores.hits} misses=${saude.contadores.misses}`);
   confere("raiz responde texto", (await (await fetch(base)).text()).includes("ativo"));
   confere("rota desconhecida → 404", (await fetch(`${base}/qualquer`)).status === 404);
@@ -202,6 +207,7 @@ try {
   drive.close();
   await new Promise((r) => setTimeout(r, 300));
   await fsp.rm(cacheDir, { recursive: true, force: true });
+  await fsp.rm(vitrineDir, { recursive: true, force: true });
 }
 if (falhas || process.argv.includes("--log")) console.log("\n--- log do entregador ---\n" + log);
 console.log(falhas ? `\n${falhas} teste(s) falharam` : "\nTudo certo.");
